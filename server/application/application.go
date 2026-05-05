@@ -2949,6 +2949,58 @@ func getProjectsFromApplicationQuery(q application.ApplicationQuery) []string {
 	return q.Projects
 }
 
+// verifyResourceInManagedResources validates resource presence in the app's managed list.
+func verifyResourceInManagedResources(
+	isNewResource bool,
+	kind, group, name, namespace string,
+	liveStateJSON string,
+	managedResources []*v1alpha1.ResourceDiff,
+	appName string,
+) error {
+	// New resources skip all checks
+	if isNewResource {
+		return nil
+	}
+
+	// Validate JSON payload matches claimed metadata
+	if liveStateJSON != "" && liveStateJSON != "null" {
+		var liveObj unstructured.Unstructured
+		if err := json.Unmarshal([]byte(liveStateJSON), &liveObj); err != nil {
+			return status.Errorf(codes.InvalidArgument,
+				"invalid live state for %s/%s/%s: %v", group, kind, name, err)
+		}
+		if liveObj.GetName() != name {
+			return status.Errorf(codes.InvalidArgument,
+				"name mismatch: expected %s, got %s for live resource %s/%s/%s",
+				name, liveObj.GetName(), group, kind, name)
+		}
+		if liveObj.GetNamespace() != namespace {
+			return status.Errorf(codes.InvalidArgument,
+				"namespace mismatch: expected %s, got %s for live resource %s/%s/%s",
+				namespace, liveObj.GetNamespace(), group, kind, name)
+		}
+		if liveObj.GroupVersionKind().Group != group {
+			return status.Errorf(codes.InvalidArgument,
+				"group mismatch: expected %s, got %s for live resource %s/%s/%s",
+				group, liveObj.GroupVersionKind().Group, group, kind, name)
+		}
+		if liveObj.GroupVersionKind().Kind != kind {
+			return status.Errorf(codes.InvalidArgument,
+				"kind mismatch: expected %s, got %s for live resource %s/%s/%s",
+				kind, liveObj.GroupVersionKind().Kind, group, kind, name)
+		}
+	}
+
+	// Check managed resources list
+	for _, item := range managedResources {
+		if item.Kind == kind && item.Group == group &&
+			item.Namespace == namespace && item.Name == name {
+			return nil
+		}
+	}
+	return status.Errorf(codes.PermissionDenied, "%s %s %s not found as part of application %s", kind, group, name, appName)
+}
+
 // ServerSideDiff gets the destination cluster and creates a server-side dry run applier and performs the diff
 // It returns the diff result in the form of a list of ResourceDiffs.
 func (s *Server) ServerSideDiff(ctx context.Context, q *application.ApplicationServerSideDiffQuery) (*application.ApplicationServerSideDiffResponse, error) {
@@ -3109,15 +3161,29 @@ func (s *Server) ServerSideDiff(ctx context.Context, q *application.ApplicationS
 				i, len(q.GetLiveResources()), len(targetObjs))
 		}
 
-		found := false
-		for _, item := range managedResources {
-			if item.Kind == kind && item.Group == group && item.Namespace == namespace && item.Name == name {
-				found = true
-				break
+		// Iterate over target objects and validate each one
+		for i, targetObj := range targetObjs {
+			liveResources := q.GetLiveResources()
+
+			// Determine if this is a new resource
+			isNewResource := i >= len(liveResources) ||
+				liveResources[i].LiveState == "" ||
+				liveResources[i].LiveState == "null"
+
+			gvk := targetObj.GroupVersionKind()
+			err := verifyResourceInManagedResources(
+				isNewResource,
+				gvk.Kind,
+				gvk.Group,
+				targetObj.GetName(),
+				targetObj.GetNamespace(),
+				liveResources[i].LiveState,
+				managedResources,
+				a.Name,
+			)
+			if err != nil {
+				return nil, err
 			}
-		}
-		if !found {
-			return nil, status.Errorf(codes.PermissionDenied, "%s %s %s not found as part of application %s", kind, group, name, a.Name)
 		}
 
 		// Create ResourceDiff with StateDiffs results

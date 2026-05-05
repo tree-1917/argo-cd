@@ -4646,6 +4646,246 @@ func TestServerSideDiff(t *testing.T) {
 	})
 }
 
+// TestVerifyResourceInManagedResources validates resource ownership and consistency.
+func TestVerifyResourceInManagedResources(t *testing.T) {
+	t.Run("new resource returns nil", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			true, // isNewResource
+			"ConfigMap", "", "new-cm", "default",
+			"", // empty liveStateJSON
+			[]*v1alpha1.ResourceDiff{},
+			"test-app",
+		)
+		require.NoError(t, err)
+	})
+
+	t.Run("new resource with liveStateJSON still returns nil", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			true,
+			"ConfigMap", "", "new-cm", "default",
+			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"new-cm","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{},
+			"test-app",
+		)
+		require.NoError(t, err)
+	})
+
+	t.Run("existing resource found in managed resources returns nil", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Deployment", "apps", "existing-deploy", "default",
+			`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"existing-deploy","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "apps", Kind: "Deployment", Namespace: "default", Name: "existing-deploy"},
+			},
+			"test-app",
+		)
+		require.NoError(t, err)
+	})
+
+	t.Run("existing resource with empty liveStateJSON checks managed resources", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Service", "", "my-svc", "default",
+			"",
+			[]*v1alpha1.ResourceDiff{
+				{Group: "", Kind: "Service", Namespace: "default", Name: "my-svc"},
+			},
+			"test-app",
+		)
+		require.NoError(t, err)
+	})
+
+	t.Run("existing resource with null liveStateJSON checks managed resources", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Service", "", "my-svc", "default",
+			"null",
+			[]*v1alpha1.ResourceDiff{
+				{Group: "", Kind: "Service", Namespace: "default", Name: "my-svc"},
+			},
+			"test-app",
+		)
+		require.NoError(t, err)
+	})
+
+	t.Run("existing resource NOT found returns PermissionDenied", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Deployment", "apps", "orphan-deploy", "default",
+			`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"orphan-deploy","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "apps", Kind: "Deployment", Namespace: "default", Name: "existing-deploy"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+		assert.Contains(t, err.Error(), "orphan-deploy")
+		assert.Contains(t, err.Error(), "not found as part of application test-app")
+	})
+
+	t.Run("empty managed resources with existing resource returns PermissionDenied", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Service", "", "my-svc", "default",
+			`{"apiVersion":"v1","kind":"Service","metadata":{"name":"my-svc","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+	})
+
+	t.Run("resource with different name not found", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Deployment", "apps", "deploy-a", "default",
+			`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"deploy-a","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "apps", Kind: "Deployment", Namespace: "default", Name: "deploy-b"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+		assert.Contains(t, err.Error(), "deploy-a")
+	})
+
+	t.Run("resource with different namespace not found", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Deployment", "apps", "my-deploy", "ns-a",
+			`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"my-deploy","namespace":"ns-a"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "apps", Kind: "Deployment", Namespace: "ns-b", Name: "my-deploy"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+	})
+
+	t.Run("resource with different group not found", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Deployment", "extensions", "my-deploy", "default",
+			`{"apiVersion":"extensions/v1beta1","kind":"Deployment","metadata":{"name":"my-deploy","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "apps", Kind: "Deployment", Namespace: "default", Name: "my-deploy"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+	})
+
+	t.Run("resource with different kind not found", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"StatefulSet", "apps", "my-deploy", "default",
+			`{"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"my-deploy","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "apps", Kind: "Deployment", Namespace: "default", Name: "my-deploy"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+	})
+
+	t.Run("multiple managed resources finds correct one", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"ConfigMap", "", "config-2", "default",
+			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"config-2","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "", Kind: "ConfigMap", Namespace: "default", Name: "config-1"},
+				{Group: "", Kind: "ConfigMap", Namespace: "default", Name: "config-2"},
+				{Group: "", Kind: "ConfigMap", Namespace: "default", Name: "config-3"},
+			},
+			"test-app",
+		)
+		require.NoError(t, err)
+	})
+
+	// JSON validation tests
+	t.Run("live state JSON name mismatch returns InvalidArgument", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"ConfigMap", "", "claimed-name", "default",
+			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"actual-name","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "", Kind: "ConfigMap", Namespace: "default", Name: "claimed-name"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "name mismatch")
+	})
+
+	t.Run("live state JSON namespace mismatch returns InvalidArgument", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"ConfigMap", "", "my-cm", "claimed-ns",
+			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"my-cm","namespace":"actual-ns"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "", Kind: "ConfigMap", Namespace: "claimed-ns", Name: "my-cm"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "namespace mismatch")
+	})
+
+	t.Run("live state JSON kind mismatch returns InvalidArgument", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Secret", "", "my-cm", "default",
+			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"my-cm","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "", Kind: "Secret", Namespace: "default", Name: "my-cm"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "kind mismatch")
+	})
+
+	t.Run("live state JSON group mismatch returns InvalidArgument", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"Deployment", "batch", "my-deploy", "default",
+			`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"my-deploy","namespace":"default"}}`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "batch", Kind: "Deployment", Namespace: "default", Name: "my-deploy"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "group mismatch")
+	})
+
+	t.Run("invalid JSON returns InvalidArgument", func(t *testing.T) {
+		err := verifyResourceInManagedResources(
+			false,
+			"ConfigMap", "", "my-cm", "default",
+			`not-valid-json`,
+			[]*v1alpha1.ResourceDiff{
+				{Group: "", Kind: "ConfigMap", Namespace: "default", Name: "my-cm"},
+			},
+			"test-app",
+		)
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "invalid live state")
+	})
+}
+
 // TestTerminateOperationWithConflicts tests that TerminateOperation properly handles
 // concurrent update conflicts by retrying with the fresh application object.
 //
