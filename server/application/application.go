@@ -3162,7 +3162,6 @@ func (s *Server) ServerSideDiff(ctx context.Context, q *application.ApplicationS
 				i, len(q.GetLiveResources()), len(targetObjs))
 		}
 
-<<<<<<< HEAD
 		// Iterate over target objects and validate each one
 		for i, targetObj := range targetObjs {
 			liveResources := q.GetLiveResources()
@@ -3185,23 +3184,6 @@ func (s *Server) ServerSideDiff(ctx context.Context, q *application.ApplicationS
 			)
 			if err != nil {
 				return nil, err
-=======
-		// Skip managed-resources check for new resources in server‑side diff
-		isNewResource := i >= len(q.GetLiveResources()) ||
-			q.GetLiveResources()[i].LiveState == "" ||
-			q.GetLiveResources()[i].LiveState == "null"
-
-		if !isNewResource {
-			found := false
-			for _, item := range managedResources {
-				if item.Kind == kind && item.Group == group && item.Namespace == namespace && item.Name == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return nil, status.Errorf(codes.PermissionDenied, "%s %s %s not found as part of application %s", kind, group, name, a.Name)
->>>>>>> d96a714897ff6f5ca03cb2d4a23e74b547beeffd
 			}
 		}
 
